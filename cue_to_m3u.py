@@ -15,6 +15,14 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import threading
 
+# Try to import tkinterdnd2 for better drag-and-drop support
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
+
 
 class CueTrack:
     """Represents a single track from a CUE sheet."""
@@ -227,6 +235,9 @@ class CueToM3uGUI:
         self.relative_paths = tk.BooleanVar(value=True)
         self.batch_mode = tk.BooleanVar(value=False)
 
+        # Drag and drop state
+        self.drag_highlight = False
+
         self.create_widgets()
 
         # Center the window
@@ -258,8 +269,9 @@ class CueToM3uGUI:
         title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
 
         # Input files section
-        ttk.Label(main_frame, text="Input CUE Files:").grid(row=1, column=0,
-                                                            sticky=tk.W)
+        dnd_text = "Input CUE Files (drag & drop or browse):" if HAS_DND else "Input CUE Files:"
+        files_label = ttk.Label(main_frame, text=dnd_text)
+        files_label.grid(row=1, column=0, sticky=tk.W)
 
         # File list frame
         file_frame = ttk.Frame(main_frame)
@@ -268,8 +280,10 @@ class CueToM3uGUI:
         file_frame.columnconfigure(0, weight=1)
         file_frame.rowconfigure(0, weight=1)
 
-        # Listbox for files
-        self.file_listbox = tk.Listbox(file_frame, height=8)
+        # Listbox for files with drag-and-drop styling
+        self.file_listbox = tk.Listbox(file_frame, height=8,
+                                       relief=tk.SUNKEN, bd=2,
+                                       selectmode=tk.EXTENDED)
         self.file_listbox.grid(row=0, column=0,
                                sticky=(tk.W, tk.E, tk.N, tk.S))
 
@@ -278,6 +292,14 @@ class CueToM3uGUI:
                                   command=self.file_listbox.yview)
         scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         self.file_listbox.config(yscrollcommand=scrollbar.set)
+
+        # Setup drag-and-drop if available
+        if HAS_DND:
+            self.setup_drag_drop()
+        else:
+            # Add keyboard shortcut for pasting file paths
+            self.root.bind('<Control-v>', self.paste_files)
+            self.root.bind('<Control-V>', self.paste_files)
 
         # File buttons frame
         file_buttons_frame = ttk.Frame(main_frame)
@@ -360,6 +382,171 @@ class CueToM3uGUI:
 
         # Initial log message
         self.log_message("Ready to convert CUE files to M3U playlists.")
+        if HAS_DND:
+            self.log_message(
+                "Tip: You can drag and drop CUE files directly into the file list!")
+        else:
+            self.log_message(
+                "Tip: Use Ctrl+V to paste file paths, or use the Add Files button.")
+
+    def setup_drag_drop(self):
+        """Setup drag-and-drop functionality using tkinterdnd2."""
+        # Configure the listbox to accept drops
+        self.file_listbox.drop_target_register(DND_FILES)
+        self.file_listbox.dnd_bind('<<Drop>>', self.on_drop)
+        self.file_listbox.dnd_bind('<<DragEnter>>', self.on_drag_enter)
+        self.file_listbox.dnd_bind('<<DragLeave>>', self.on_drag_leave)
+
+        # Also enable drop on the main window for convenience
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind('<<Drop>>', self.on_drop)
+
+    def on_drop(self, event):
+        """Handle dropped files with improved parsing."""
+        files = event.data
+
+        # Debug: Show raw event data
+        print(f"DEBUG: Raw drop data: {files}")
+        print(f"DEBUG: Type: {type(files)}")
+
+        # Handle different file data formats more robustly
+        if isinstance(files, str):
+            # Parse the string - files can be separated by spaces or newlines
+            # and may be enclosed in braces
+            files_str = files.strip()
+
+            # Handle different formats:
+            # 1. Single file: "C:\path\to\file.cue"
+            # 2. Multiple files: {C:\path\to\file1.cue C:\path\to\file2.cue}
+            # 3. Multiple files with newlines
+
+            if files_str.startswith('{') and files_str.endswith('}'):
+                # Remove braces and split by spaces, but preserve quoted paths
+                files_str = files_str[1:-1]
+
+            # Split more intelligently to handle paths with spaces
+            import shlex
+            try:
+                # Try to parse as shell-like arguments (handles quotes and spaces)
+                files = shlex.split(files_str)
+            except ValueError:
+                # Fallback to simple splitting
+                files = files_str.replace('\n', ' ').split()
+
+        elif isinstance(files, (list, tuple)):
+            files = list(files)
+        else:
+            # Convert to string and try to parse
+            files_str = str(files).strip('{}').replace('\n', ' ')
+            try:
+                import shlex
+                files = shlex.split(files_str)
+            except ValueError:
+                files = files_str.split()
+
+        # Process and add CUE files
+        self.add_files_from_paths(files)
+
+    def on_drag_enter(self, event):
+        """Visual feedback when dragging over the listbox."""
+        if not self.drag_highlight:
+            self.file_listbox.config(bg='#e6f3ff')
+            self.drag_highlight = True
+
+    def on_drag_leave(self, event):
+        """Reset visual feedback when drag leaves the listbox."""
+        if self.drag_highlight:
+            self.file_listbox.config(bg='white')
+            self.drag_highlight = False
+
+    def paste_files(self, event=None):
+        """Handle pasting file paths from clipboard."""
+        try:
+            clipboard_content = self.root.clipboard_get()
+            if clipboard_content:
+                # Split by newlines and spaces to handle multiple paths
+                paths = []
+                for line in clipboard_content.split('\n'):
+                    paths.extend(line.split())
+
+                self.add_files_from_paths(paths)
+        except tk.TclError:
+            # Clipboard is empty or contains non-text data
+            pass
+
+    def add_files_from_paths(self, paths):
+        """Add files from a list of file paths."""
+        cue_files = []
+
+        # Debug: Print the raw paths received
+        print(f"DEBUG: Received paths: {paths}")
+        print(f"DEBUG: Type of paths: {type(paths)}")
+
+        for path in paths:
+            # Clean up the path more thoroughly
+            path = path.strip('"\'').strip()
+
+            # Handle Windows-style paths with backslashes
+            path = path.replace('\\', '/')
+
+            # Skip empty paths
+            if not path:
+                continue
+
+            # Debug: Print each cleaned path
+            print(f"DEBUG: Cleaned path: '{path}'")
+            print(f"DEBUG: File exists: {os.path.exists(path)}")
+            print(f"DEBUG: Is CUE file: {path.lower().endswith('.cue')}")
+
+            # Check if it's a valid CUE file
+            if os.path.exists(path) and path.lower().endswith('.cue'):
+                cue_files.append(path)
+            else:
+                # Try to resolve relative path
+                if not os.path.exists(path):
+                    # Try treating it as relative to current working directory
+                    abs_path = os.path.abspath(path)
+                    if os.path.exists(abs_path) and abs_path.lower().endswith(
+                            '.cue'):
+                        cue_files.append(abs_path)
+                        print(
+                            f"DEBUG: Found file using absolute path: {abs_path}")
+
+        # Add the files
+        added_count = 0
+        for cue_file in cue_files:
+            if cue_file not in self.input_files:
+                self.input_files.append(cue_file)
+                self.file_listbox.insert(tk.END, os.path.basename(cue_file))
+                added_count += 1
+
+        # Reset drag highlight
+        if self.drag_highlight:
+            self.file_listbox.config(bg='white')
+            self.drag_highlight = False
+
+        # Log the results with more detailed feedback
+        if added_count > 0:
+            method = "drag-and-drop" if HAS_DND else "paste"
+            self.log_message(f"Added {added_count} CUE file(s) via {method}.")
+        elif cue_files:
+            self.log_message("No new files added - files already in list.")
+        else:
+            # More helpful error message
+            valid_paths = [p for p in paths if p.strip()]
+            if valid_paths:
+                self.log_message(
+                    f"No valid CUE files found in {len(valid_paths)} path(s). Check that files exist and have .cue extension.")
+                # Show the first few paths for debugging
+                for i, path in enumerate(valid_paths[:3]):
+                    cleaned = path.strip('"\'').strip()
+                    exists = os.path.exists(cleaned)
+                    is_cue = cleaned.lower().endswith('.cue')
+                    self.log_message(
+                        f"  Path {i + 1}: {cleaned} (exists: {exists}, is CUE: {is_cue})")
+            else:
+                self.log_message("No valid paths provided.")
+
 
     def toggle_batch_mode(self):
         """Toggle batch mode and update UI accordingly."""
@@ -548,7 +735,10 @@ Examples:
 
         if args.gui or not args.input:
             # Launch GUI mode
-            root = tk.Tk()
+            if HAS_DND:
+                root = TkinterDnD.Tk()
+            else:
+                root = tk.Tk()
             app = CueToM3uGUI(root)
             root.mainloop()
             return 0
@@ -601,7 +791,10 @@ Examples:
 
     else:
         # No arguments - launch GUI by default
-        root = tk.Tk()
+        if HAS_DND:
+            root = TkinterDnD.Tk()
+        else:
+            root = tk.Tk()
         app = CueToM3uGUI(root)
         root.mainloop()
 
