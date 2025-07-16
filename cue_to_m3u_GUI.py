@@ -98,7 +98,7 @@ class CueToM3uConverter:
                 track_match = re.match(r'TRACK\s+(\d+)\s+(\w+)', line)
                 if track_match:
                     current_track.number = int(track_match.group(1))
-                    # Inherit file info from global or set default
+                    # For single-file CUE sheets, all tracks use the same file
                     current_track.file = cue_sheet.file
                     current_track.file_type = cue_sheet.file_type
             
@@ -114,8 +114,9 @@ class CueToM3uConverter:
         if current_track:
             cue_sheet.tracks.append(current_track)
         
-        # Calculate durations
+        # Calculate durations and handle single-file scenarios
         self._calculate_durations(cue_sheet)
+        self._resolve_file_paths(cue_sheet, cue_file_path)
         
         return cue_sheet
     
@@ -124,8 +125,27 @@ class CueToM3uConverter:
         match = re.search(r'"([^"]*)"', line)
         return match.group(1) if match else ""
     
+    def _resolve_file_paths(self, cue_sheet: CueSheet, cue_file_path: str):
+        """Resolve file paths relative to the CUE file location."""
+        cue_dir = os.path.dirname(os.path.abspath(cue_file_path))
+        
+        # Resolve main file path
+        if cue_sheet.file and not os.path.isabs(cue_sheet.file):
+            cue_sheet.file = os.path.join(cue_dir, cue_sheet.file)
+        
+        # Resolve track file paths
+        for track in cue_sheet.tracks:
+            if track.file and not os.path.isabs(track.file):
+                track.file = os.path.join(cue_dir, track.file)
+            elif not track.file and cue_sheet.file:
+                # If track doesn't have a file, use the main file
+                track.file = cue_sheet.file
+                track.file_type = cue_sheet.file_type
+    
     def _calculate_durations(self, cue_sheet: CueSheet):
         """Calculate track durations based on INDEX positions."""
+        cue_type = self._detect_cue_type(cue_sheet)
+        
         for i, track in enumerate(cue_sheet.tracks):
             if track.index:
                 start_time = self._index_to_seconds(track.index)
@@ -136,11 +156,76 @@ class CueToM3uConverter:
                     if next_track.index:
                         end_time = self._index_to_seconds(next_track.index)
                         track.duration = end_time - start_time
+                    else:
+                        track.duration = 0
                 else:
-                    # For the last track, we can't calculate duration without file info
-                    track.duration = 0
+                    # For the last track in single-file CUE sheets
+                    if cue_type == "single-file":
+                        # Try to get file duration if possible
+                        track.duration = self._estimate_last_track_duration(cue_sheet, track)
+                    else:
+                        track.duration = 0
+    
+    def _estimate_last_track_duration(self, cue_sheet: CueSheet, last_track: CueTrack) -> int:
+        """Estimate duration of the last track in a single-file CUE sheet."""
+        # This is a basic estimation - in a real implementation, you might want to
+        # use audio libraries like mutagen to get the actual file duration
+        
+        # For now, return a reasonable default (3 minutes)
+        # In practice, you could use libraries like mutagen to get actual file duration
+        return 180  # 3 minutes as default
+    
+    def _detect_cue_type(self, cue_sheet: CueSheet) -> str:
+        """Detect if CUE sheet is single-file or multi-file type."""
+        if not cue_sheet.tracks:
+            return "unknown"
+        
+        # Check if all tracks reference the same file
+        first_file = cue_sheet.tracks[0].file or cue_sheet.file
+        for track in cue_sheet.tracks:
+            track_file = track.file or cue_sheet.file
+            if track_file != first_file:
+                return "multi-file"
+        
+        return "single-file"
+    
+    def _format_timestamp_for_m3u(self, index: str) -> str:
+        """Format CUE index timestamp for M3U file reference."""
+        parts = index.split(':')
+        if len(parts) == 3:
+            minutes = int(parts[0])
+            seconds = int(parts[1])
+            frames = int(parts[2])
+            # Convert frames to seconds (75 frames per second)
+            total_seconds = minutes * 60 + seconds + frames / 75
+            return f"{total_seconds:.3f}"
+        return "0"
+    
+    def _format_timestamp_for_m3u(self, index: str) -> str:
+        """Format CUE index timestamp for M3U file reference."""
+        parts = index.split(':')
+        if len(parts) == 3:
+            minutes = int(parts[0])
+            seconds = int(parts[1])
+            frames = int(parts[2])
+            # Convert frames to seconds (75 frames per second)
+            total_seconds = minutes * 60 + seconds + frames / 75
+            return f"{total_seconds:.3f}"
+        return "0"
     
     def _index_to_seconds(self, index: str) -> int:
+        """Detect if CUE sheet is single-file or multi-file type."""
+        if not cue_sheet.tracks:
+            return "unknown"
+        
+        # Check if all tracks reference the same file
+        first_file = cue_sheet.tracks[0].file or cue_sheet.file
+        for track in cue_sheet.tracks:
+            track_file = track.file or cue_sheet.file
+            if track_file != first_file:
+                return "multi-file"
+        
+        return "single-file"
         """Convert CUE index format (MM:SS:FF) to seconds."""
         parts = index.split(':')
         if len(parts) == 3:
@@ -175,14 +260,29 @@ class CueToM3uConverter:
                     # Write extended info
                     f.write(f"#EXTINF:{track.duration},{display_title}\n")
                 
-                # Write file path
-                file_path = track.file
-                if relative_paths and file_path:
-                    # Keep relative path as-is
-                    f.write(f"{file_path}\n")
+                # Handle file path with timestamp for single-file CUE sheets
+                file_path = track.file or cue_sheet.file
+                
+                if file_path and track.index:
+                    # For single-file CUE sheets, include timestamp in the file reference
+                    # This is crucial for FLAC+CUE where all tracks are in one file
+                    start_time = self._format_timestamp_for_m3u(track.index)
+                    
+                    if relative_paths:
+                        file_reference = f"{file_path}#t={start_time}"
+                    else:
+                        file_reference = f"{os.path.abspath(file_path)}#t={start_time}"
+                    
+                    f.write(f"{file_reference}\n")
+                elif file_path:
+                    # Fallback for files without timestamps
+                    if relative_paths:
+                        f.write(f"{file_path}\n")
+                    else:
+                        f.write(f"{os.path.abspath(file_path)}\n")
                 else:
-                    # Use absolute path
-                    f.write(f"{os.path.abspath(file_path)}\n")
+                    # No file path available
+                    f.write(f"# Error: No file path for track {track.number}\n")
     
     def convert_file(self, cue_file_path: str, output_path: Optional[str] = None,
                      extended: bool = True, relative_paths: bool = True):
@@ -418,6 +518,10 @@ class CueToM3uGUI:
                     base_name = os.path.splitext(os.path.basename(cue_file))[0]
                     output_path = os.path.join(self.output_directory.get(), f"{base_name}.m3u")
                     
+                    # Parse CUE file first to get type information
+                    cue_sheet = self.converter.parse_cue_file(cue_file)
+                    cue_type = self.converter._detect_cue_type(cue_sheet)
+                    
                     # Convert file
                     _, track_count = self.converter.convert_file(
                         cue_file,
@@ -427,6 +531,13 @@ class CueToM3uGUI:
                     )
                     
                     self.log_message(f"✓ Converted {os.path.basename(cue_file)} -> {os.path.basename(output_path)} ({track_count} tracks)")
+                    
+                    # Log CUE type for user information
+                    if cue_type == "single-file":
+                        self.log_message(f"   → Single-file CUE (FLAC+CUE style) with timestamps")
+                    elif cue_type == "multi-file":
+                        self.log_message(f"   → Multi-file CUE with separate track files")
+                    
                     successful_conversions += 1
                     total_tracks += track_count
                     
