@@ -13,6 +13,7 @@ A Python application that converts CUE sheets to M3U playlists.
 ### Main Interface:
 - **File Selection:** Add/remove CUE files with a visual list
 - **Output Directory:** Browse and select where M3U files will be saved
+- **Batch Mode Toggle:** Save each M3U file in the same directory as its corresponding CUE file.
 - **Options Panel:** Checkboxes for extended format and relative paths
 - **Progress Bar:** Shows conversion progress in real-time
 - **Status Log:** Displays detailed conversion results and errors
@@ -52,7 +53,7 @@ python cue_to_m3u.py --gui    # Explicit GUI launch
 python cue_to_m3u.py album.cue
 
 # Specify output file
-python cue_to_m3u.py album.cue -o my_playlist.m3u
+python cue_to_m3u.py album.cue -o /path/to/playlist.m3u
 
 # Generate simple M3U format
 python cue_to_m3u.py album.cue --simple

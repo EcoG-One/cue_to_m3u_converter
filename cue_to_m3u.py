@@ -64,7 +64,9 @@ class CueToM3uConverter:
                 lines = f.readlines()
         except UnicodeDecodeError:
             # Try with different encoding if UTF-8 fails
-            with open(cue_file_path, 'r', encoding='latin-1') as f:
+            from charset_normalizer import from_path
+            result = from_path(cue_file_path).best()
+            with open(cue_file_path, 'r', encoding=result.encoding) as f:
                 lines = f.readlines()
 
         for line in lines:
@@ -161,7 +163,7 @@ class CueToM3uConverter:
         return 0
 
     def convert_to_m3u(self, cue_sheet: CueSheet, output_path: str,
-                       extended: bool = True, relative_paths: bool = True):
+                       extended: bool = True, relative_paths: bool = True, wav_to_flac: bool = True):
         """Convert CueSheet to M3U format and save to file."""
 
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -186,6 +188,8 @@ class CueToM3uConverter:
 
                 # Write file path
                 file_path = track.file
+                if wav_to_flac and file_path[-3:] == 'wav':
+                    file_path = file_path[:-3] + 'flac'
                 if relative_paths and file_path:
                     # Keep relative path as-is
                     f.write(f"{file_path}\n")
@@ -195,7 +199,7 @@ class CueToM3uConverter:
 
     def convert_file(self, cue_file_path: str,
                      output_path: Optional[str] = None,
-                     extended: bool = True, relative_paths: bool = True):
+                     extended: bool = True, relative_paths: bool = True, wav_to_flac: bool = True):
         """Convert a single CUE file to M3U format."""
 
         if not os.path.exists(cue_file_path):
@@ -212,7 +216,7 @@ class CueToM3uConverter:
             output_path = os.path.join(cue_dir, f"{base_name}.m3u")
 
         # Convert to M3U
-        self.convert_to_m3u(cue_sheet, output_path, extended, relative_paths)
+        self.convert_to_m3u(cue_sheet, output_path, extended, relative_paths, wav_to_flac)
 
         return output_path, len(cue_sheet.tracks)
 
@@ -233,12 +237,24 @@ class CueToM3uGUI:
         self.output_directory = tk.StringVar()
         self.extended_format = tk.BooleanVar(value=True)
         self.relative_paths = tk.BooleanVar(value=True)
+        self.wav_to_flac = tk.BooleanVar(value=True)
         self.batch_mode = tk.BooleanVar(value=False)
 
         # Drag and drop state
         self.drag_highlight = False
 
+        # Initialize debug mode
+        self.debug_mode = False
+
+        # Create widgets
         self.create_widgets()
+
+        self.create_debug_bindings()
+        if HAS_DND:
+            self.setup_drag_drop()
+        else:
+            self.log_message(
+                "tkinterdnd2 not available - using keyboard shortcuts instead.")
 
         # Center the window
         self.center_window()
@@ -254,6 +270,7 @@ class CueToM3uGUI:
 
     def create_widgets(self):
         """Create and layout all GUI widgets."""
+
         # Main frame
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -292,14 +309,6 @@ class CueToM3uGUI:
                                   command=self.file_listbox.yview)
         scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         self.file_listbox.config(yscrollcommand=scrollbar.set)
-
-        # Setup drag-and-drop if available
-        if HAS_DND:
-            self.setup_drag_drop()
-        else:
-            # Add keyboard shortcut for pasting file paths
-            self.root.bind('<Control-v>', self.paste_files)
-            self.root.bind('<Control-V>', self.paste_files)
 
         # File buttons frame
         file_buttons_frame = ttk.Frame(main_frame)
@@ -343,10 +352,13 @@ class CueToM3uGUI:
         ttk.Checkbutton(options_frame, text="Use relative file paths",
                         variable=self.relative_paths).grid(row=1, column=0,
                                                            sticky=tk.W)
+        ttk.Checkbutton(options_frame, text="Convert .wav to .flac",
+                        variable=self.wav_to_flac).grid(row=2, column=0,
+                                                           sticky=tk.W)
         ttk.Checkbutton(options_frame,
                         text="Batch mode (save to input file locations)",
                         variable=self.batch_mode,
-                        command=self.toggle_batch_mode).grid(row=2, column=0,
+                        command=self.toggle_batch_mode).grid(row=3, column=0,
                                                              sticky=tk.W)
 
         # Convert button
@@ -389,63 +401,144 @@ class CueToM3uGUI:
             self.log_message(
                 "Tip: Use Ctrl+V to paste file paths, or use the Add Files button.")
 
-    def setup_drag_drop(self):
-        """Setup drag-and-drop functionality using tkinterdnd2."""
-        # Configure the listbox to accept drops
-        self.file_listbox.drop_target_register(DND_FILES)
-        self.file_listbox.dnd_bind('<<Drop>>', self.on_drop)
-        self.file_listbox.dnd_bind('<<DragEnter>>', self.on_drag_enter)
-        self.file_listbox.dnd_bind('<<DragLeave>>', self.on_drag_leave)
+        # Also bind keyboard shortcuts here since we don't have drag-and-drop
+        if not HAS_DND:
+            self.root.bind('<Control-v>', self.paste_files)
+            self.root.bind('<Control-V>', self.paste_files)
 
-        # Also enable drop on the main window for convenience
-        self.root.drop_target_register(DND_FILES)
-        self.root.dnd_bind('<<Drop>>', self.on_drop)
+    def setup_drag_drop(self):
+        """Setup drag-and-drop functionality with better error handling."""
+        try:
+            # Make sure log_text exists before proceeding
+            if not hasattr(self, 'log_text'):
+                print(
+                    "Warning: log_text not available, skipping drag-and-drop setup")
+                return
+
+            # Configure the listbox to accept drops
+            self.file_listbox.drop_target_register(DND_FILES)
+            self.file_listbox.dnd_bind('<<Drop>>', self.on_drop)
+            self.file_listbox.dnd_bind('<<DragEnter>>', self.on_drag_enter)
+            self.file_listbox.dnd_bind('<<DragLeave>>', self.on_drag_leave)
+
+            # Also enable drop on the main window for convenience
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind('<<Drop>>', self.on_drop)
+
+            self.log_message("Drag-and-drop functionality enabled.")
+
+        except Exception as e:
+            error_msg = f"Warning: Could not set up drag-and-drop: {e}"
+            if hasattr(self, 'log_text'):
+                self.log_message(error_msg)
+            else:
+                print(error_msg)
+
+    def validate_cue_file(self, file_path):
+        """Validate that a file is a proper CUE file."""
+        if not os.path.exists(file_path):
+            return False, "File does not exist"
+
+        if not file_path.lower().endswith('.cue'):
+            return False, "File does not have .cue extension"
+
+        try:
+            # Try to read the file to ensure it's accessible
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read(1024)  # Read first 1KB
+
+            # Check if it looks like a CUE file
+            if not any(keyword in content.upper() for keyword in
+                       ['TRACK', 'INDEX', 'TITLE', 'PERFORMER']):
+                return False, "File does not appear to be a valid CUE file"
+
+            return True, "Valid CUE file"
+
+        except UnicodeDecodeError:
+            try:
+                # Try with different encoding
+                with open(file_path, 'r', encoding='latin-1') as f:
+                    content = f.read(1024)
+                return True, "Valid CUE file (latin-1 encoding)"
+            except Exception as e:
+                return False, f"Cannot read file: {e}"
+        except Exception as e:
+            return False, f"Cannot read file: {e}"
 
     def on_drop(self, event):
-        """Handle dropped files with improved parsing."""
+        """Handle dropped files with improved parsing for paths containing spaces."""
         files = event.data
 
         # Debug: Show raw event data
-        print(f"DEBUG: Raw drop data: {files}")
-        print(f"DEBUG: Type: {type(files)}")
+        if hasattr(self, 'debug_mode') and self.debug_mode:
+            print(f"DEBUG: Raw drop data: {files}")
+            print(f"DEBUG: Type: {type(files)}")
 
         # Handle different file data formats more robustly
         if isinstance(files, str):
-            # Parse the string - files can be separated by spaces or newlines
-            # and may be enclosed in braces
             files_str = files.strip()
 
-            # Handle different formats:
-            # 1. Single file: "C:\path\to\file.cue"
-            # 2. Multiple files: {C:\path\to\file1.cue C:\path\to\file2.cue}
-            # 3. Multiple files with newlines
-
+            # Handle different formats based on the platform and drag source
             if files_str.startswith('{') and files_str.endswith('}'):
-                # Remove braces and split by spaces, but preserve quoted paths
-                files_str = files_str[1:-1]
-
-            # Split more intelligently to handle paths with spaces
-            import shlex
-            try:
-                # Try to parse as shell-like arguments (handles quotes and spaces)
-                files = shlex.split(files_str)
-            except ValueError:
-                # Fallback to simple splitting
-                files = files_str.replace('\n', ' ').split()
+                # Windows format: {C:\path\to\file1.cue} {C:\path\to\file2.cue}
+                import re
+                # Use regular expressions to find all contents inside curly braces
+                files = re.findall(r"\{([^}]+)\}", files_str)
+                if not all(file.endswith('.cue') for file in files):
+                    # Windows format: {C:\path\to\file1.cue C:\path\to\file2.cue}
+                    # Remove braces
+                    files_str = files_str[1:-1].strip()
+                    # For Windows paths with spaces, we need to be more careful
+                    # Try to detect if paths are space-separated or newline-separated
+                    if '\n' in files_str:
+                        # Newline-separated paths
+                        files = [path.strip() for path in files_str.split('\n') if
+                                 path.strip()]
+                    else:
+                        # Space-separated paths - this is tricky with spaces in paths
+                        # Look for patterns that suggest multiple files
+                        files = self._parse_space_separated_paths(files_str)
+            else:
+                # Handle single file or newline-separated files
+                if '\n' in files_str:
+                    files = [path.strip() for path in files_str.split('\n') if
+                             path.strip()]
+                else:
+                    # Single file
+                    files = [files_str]
 
         elif isinstance(files, (list, tuple)):
             files = list(files)
         else:
             # Convert to string and try to parse
-            files_str = str(files).strip('{}').replace('\n', ' ')
-            try:
-                import shlex
-                files = shlex.split(files_str)
-            except ValueError:
-                files = files_str.split()
+            files_str = str(files).strip()
+            if files_str.startswith('{') and files_str.endswith('}'):
+                files_str = files_str[1:-1].strip()
+
+            if '\n' in files_str:
+                files = [path.strip() for path in files_str.split('\n') if
+                         path.strip()]
+            else:
+                files = [files_str]
+
+        # Clean up the file paths
+        cleaned_files = []
+        for path in files:
+            # Remove surrounding quotes and whitespace
+            cleaned_path = path.strip('"\'').strip()
+
+            # Skip empty paths
+            if not cleaned_path:
+                continue
+
+            # Normalize path separators for the current OS
+            cleaned_path = os.path.normpath(cleaned_path)
+
+            if cleaned_path:
+                cleaned_files.append(cleaned_path)
 
         # Process and add CUE files
-        self.add_files_from_paths(files)
+        self.add_files_from_paths(cleaned_files)
 
     def on_drag_enter(self, event):
         """Visual feedback when dragging over the listbox."""
@@ -474,45 +567,114 @@ class CueToM3uGUI:
             # Clipboard is empty or contains non-text data
             pass
 
+    def _parse_space_separated_paths(self, files_str):
+        """
+        Parse space-separated file paths, handling paths that contain spaces.
+
+        This is a heuristic approach since it's difficult to reliably separate
+        space-separated paths when the paths themselves contain spaces.
+        """
+        # First, try the simple approach with shlex
+        try:
+            import shlex
+            files = shlex.split(files_str)
+            # If all parsed items are valid file paths, use this result
+            if all(os.path.exists(path.strip('"\'')) for path in files):
+                return files
+        except (ValueError, ImportError):
+            pass
+
+        # Fallback: Try to detect file boundaries by looking for .cue extensions
+        # This assumes files end with .cue
+        parts = files_str.split()
+        files = []
+        current_path = ""
+
+        for part in parts:
+            if current_path:
+                current_path += " " + part
+            else:
+                current_path = part
+
+            # Check if this could be the end of a file path
+            if part.lower().endswith('.cue'):
+                # This might be a complete file path
+                test_path = current_path.strip('"\'')
+                if os.path.exists(test_path):
+                    files.append(current_path)
+                    current_path = ""
+
+        # Add any remaining path
+        if current_path:
+            files.append(current_path)
+
+        # If we couldn't parse it properly, fall back to treating the whole thing as one path
+        if not files:
+            files = [files_str]
+
+        return files
+
     def add_files_from_paths(self, paths):
-        """Add files from a list of file paths."""
+        """Add files from a list of file paths with improved path handling."""
         cue_files = []
 
         # Debug: Print the raw paths received
-        print(f"DEBUG: Received paths: {paths}")
-        print(f"DEBUG: Type of paths: {type(paths)}")
+        if hasattr(self, 'debug_mode') and self.debug_mode:
+            print(f"DEBUG: Received paths: {paths}")
+            print(f"DEBUG: Type of paths: {type(paths)}")
 
         for path in paths:
-            # Clean up the path more thoroughly
+            # Clean up the path thoroughly
+            original_path = path
             path = path.strip('"\'').strip()
-
-            # Handle Windows-style paths with backslashes
-            path = path.replace('\\', '/')
 
             # Skip empty paths
             if not path:
                 continue
 
-            # Debug: Print each cleaned path
-            print(f"DEBUG: Cleaned path: '{path}'")
-            print(f"DEBUG: File exists: {os.path.exists(path)}")
-            print(f"DEBUG: Is CUE file: {path.lower().endswith('.cue')}")
+            # Normalize path separators for the current OS
+            path = os.path.normpath(path)
 
-            # Check if it's a valid CUE file
-            if os.path.exists(path) and path.lower().endswith('.cue'):
+            # Debug: Print each cleaned path
+            if hasattr(self, 'debug_mode') and self.debug_mode:
+                print(f"DEBUG: Original path: '{original_path}'")
+                print(f"DEBUG: Cleaned path: '{path}'")
+                print(f"DEBUG: File exists: {os.path.exists(path)}")
+                print(f"DEBUG: Is CUE file: {path.lower().endswith('.cue')}")
+
+            # First check if it's a valid CUE file path
+            if self._is_valid_cue_file(path):
                 cue_files.append(path)
             else:
-                # Try to resolve relative path
-                if not os.path.exists(path):
-                    # Try treating it as relative to current working directory
+                # Try to resolve as relative path
+                if not os.path.isabs(path):
+                    # Try relative to current working directory
                     abs_path = os.path.abspath(path)
-                    if os.path.exists(abs_path) and abs_path.lower().endswith(
-                            '.cue'):
+                    if self._is_valid_cue_file(abs_path):
                         cue_files.append(abs_path)
-                        print(
-                            f"DEBUG: Found file using absolute path: {abs_path}")
+                        if hasattr(self, 'debug_mode') and self.debug_mode:
+                            print(
+                                f"DEBUG: Found file using absolute path: {abs_path}")
+                        continue
 
-        # Add the files
+                # If still not found, try some common path variations
+                if not os.path.exists(path):
+                    # Try removing common prefixes that might be added by the OS
+                    clean_variations = [
+                        path.replace('file:///', ''),
+                        path.replace('file://', ''),
+                        path.replace('file:', ''),
+                    ]
+
+                    for variation in clean_variations:
+                        if self._is_valid_cue_file(variation):
+                            cue_files.append(variation)
+                            if hasattr(self, 'debug_mode') and self.debug_mode:
+                                print(
+                                    f"DEBUG: Found file using variation: {variation}")
+                            break
+
+        # Add the files to the list
         added_count = 0
         for cue_file in cue_files:
             if cue_file not in self.input_files:
@@ -520,12 +682,12 @@ class CueToM3uGUI:
                 self.file_listbox.insert(tk.END, os.path.basename(cue_file))
                 added_count += 1
 
-        # Reset drag highlight
-        if self.drag_highlight:
+        # Reset drag highlight if active
+        if hasattr(self, 'drag_highlight') and self.drag_highlight:
             self.file_listbox.config(bg='white')
             self.drag_highlight = False
 
-        # Log the results with more detailed feedback
+        # Log the results with detailed feedback
         if added_count > 0:
             method = "drag-and-drop" if HAS_DND else "paste"
             self.log_message(f"Added {added_count} CUE file(s) via {method}.")
@@ -536,17 +698,44 @@ class CueToM3uGUI:
             valid_paths = [p for p in paths if p.strip()]
             if valid_paths:
                 self.log_message(
-                    f"No valid CUE files found in {len(valid_paths)} path(s). Check that files exist and have .cue extension.")
+                    f"No valid CUE files found in {len(valid_paths)} path(s). "
+                    f"Check that files exist and have .cue extension."
+                )
                 # Show the first few paths for debugging
                 for i, path in enumerate(valid_paths[:3]):
                     cleaned = path.strip('"\'').strip()
-                    exists = os.path.exists(cleaned)
-                    is_cue = cleaned.lower().endswith('.cue')
+                    normalized = os.path.normpath(cleaned)
+                    exists = os.path.exists(normalized)
+                    is_cue = normalized.lower().endswith('.cue')
                     self.log_message(
-                        f"  Path {i + 1}: {cleaned} (exists: {exists}, is CUE: {is_cue})")
+                        f"  Path {i + 1}: {normalized} (exists: {exists}, is CUE: {is_cue})"
+                    )
             else:
                 self.log_message("No valid paths provided.")
 
+    def _is_valid_cue_file(self, path):
+        """Check if a path points to a valid CUE file."""
+        if not path or not os.path.exists(path):
+            return False
+
+        if not path.lower().endswith('.cue'):
+            return False
+
+        # Additional validation could be added here
+        # For now, just check if it's a readable file
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                # Try to read a small portion to verify it's accessible
+                f.read(100)
+            return True
+        except (UnicodeDecodeError, OSError):
+            # Try with latin-1 encoding
+            try:
+                with open(path, 'r', encoding='latin-1') as f:
+                    f.read(100)
+                return True
+            except OSError:
+                return False
 
     def toggle_batch_mode(self):
         """Toggle batch mode and update UI accordingly."""
@@ -663,7 +852,8 @@ class CueToM3uGUI:
                         cue_file,
                         output_path,
                         extended=self.extended_format.get(),
-                        relative_paths=self.relative_paths.get()
+                        relative_paths=self.relative_paths.get(),
+                        wav_to_flac = self.wav_to_flac.get()
                     )
 
                     self.log_message(
@@ -699,6 +889,64 @@ class CueToM3uGUI:
             self.convert_button.config(state='normal')
             # Reset progress bar after a short delay
             self.root.after(2000, lambda: self.progress_var.set(0))
+
+
+    def enable_debug_mode(self):
+        """Enable debug mode for troubleshooting."""
+        self.debug_mode = True
+        self.log_message("Debug mode enabled - check console for detailed output.")
+
+
+    # Add a debug menu to the GUI
+    def create_debug_menu(self):
+        """Create a debug menu for troubleshooting."""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        debug_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Debug", menu=debug_menu)
+        debug_menu.add_command(label="Enable Debug Mode",
+                               command=self.enable_debug_mode)
+        debug_menu.add_separator()
+        debug_menu.add_command(label="Test Drag-Drop", command=self.test_drag_drop)
+
+
+    def test_drag_drop(self):
+        """Test drag-and-drop functionality."""
+        self.log_message("Testing drag-and-drop functionality...")
+
+        # Test with a sample path
+        test_paths = [
+            "C:\\test\\sample.cue",
+            "/home/user/test.cue",
+            "relative/path/test.cue"
+        ]
+
+        self.log_message("Testing path parsing with sample paths:")
+        for path in test_paths:
+            cleaned = path.strip('"\'').strip()
+            exists = os.path.exists(cleaned)
+            is_cue = cleaned.lower().endswith('.cue')
+            self.log_message(f"  {path} -> exists: {exists}, is CUE: {is_cue}")
+
+        if HAS_DND:
+            self.log_message("tkinterdnd2 is available and should work.")
+        else:
+            self.log_message(
+                "tkinterdnd2 is NOT available. Using clipboard paste instead.")
+
+    # enable debug mode for testing
+    def enable_debug_mode(self):
+        """Enable debug mode for troubleshooting."""
+        self.debug_mode = True
+        self.log_message(
+            "Debug mode enabled - check console for detailed output.")
+
+    # keyboard shortcut to enable debug mode
+    def create_debug_bindings(self):
+        """Create keyboard shortcuts for debugging."""
+        self.root.bind('<Control-d>', lambda e: self.enable_debug_mode())
+        self.root.bind('<Control-D>', lambda e: self.enable_debug_mode())
 
 
 def main():
