@@ -7,6 +7,7 @@ It parses CUE files and extracts track information to create standard M3U playli
 """
 
 import os
+import sys
 import re
 import argparse
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import List, Dict, Optional, Tuple
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import threading
+import shlex
 
 # Try to import tkinterdnd2 for better drag-and-drop support
 try:
@@ -63,11 +65,16 @@ class CueToM3uConverter:
             with open(cue_file_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
         except UnicodeDecodeError:
-            # Try with different encoding if UTF-8 fails
-            from charset_normalizer import from_path
-            result = from_path(cue_file_path).best()
-            with open(cue_file_path, 'r', encoding=result.encoding) as f:
-                lines = f.readlines()
+            # Try with ANSI encoding if UTF-8 fails
+            try:
+                with open(cue_file_path, 'r', encoding='ANSI') as f:
+                    lines = f.readlines()
+            except UnicodeDecodeError:
+                # Try to guess the encoding if UTF-8 and ANSI fail
+                from charset_normalizer import from_path
+                result = from_path(cue_file_path).best()
+                with open(cue_file_path, 'r', encoding=result.encoding) as f:
+                    lines = f.readlines()
 
         for line in lines:
             line = line.strip()
@@ -481,9 +488,8 @@ class CueToM3uGUI:
             # Handle different formats based on the platform and drag source
             if files_str.startswith('{') and files_str.endswith('}'):
                 # Windows format: {C:\path\to\file1.cue} {C:\path\to\file2.cue}
-                import re
-                # Use regular expressions to find all contents inside curly braces
-                files = re.findall(r"\{([^}]+)\}", files_str)
+                # Use regular expressions to find all contents inside curly braces \{[^}]*\.cue\}
+                files = re.findall(r"\{([^}]*\.cue)\}", files_str)
                 if not all(file.endswith('.cue') for file in files):
                     # Windows format: {C:\path\to\file1.cue C:\path\to\file2.cue}
                     # Remove braces
@@ -576,7 +582,6 @@ class CueToM3uGUI:
         """
         # First, try the simple approach with shlex
         try:
-            import shlex
             files = shlex.split(files_str)
             # If all parsed items are valid file paths, use this result
             if all(os.path.exists(path.strip('"\'')) for path in files):
@@ -951,7 +956,6 @@ class CueToM3uGUI:
 
 def main():
     """Main function to handle both CLI and GUI modes."""
-    import sys
 
     if len(sys.argv) > 1:
         # Command-line mode
